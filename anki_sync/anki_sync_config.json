@@ -11,7 +11,8 @@
     "veto":             "Intensive Spanish Deck::Unused Spanish Deck"
   },
 
-  "note_type": "2.1. Spanish Picture Words",
+  "_note_type_warning": "The trailing space in note_type below is INTENTIONAL — that's the actual name of the model in Anki. Don't 'fix' it.",
+  "note_type": "2.1. Spanish Picture Words ",
 
   "id_format": {
     "prefix":  "LX-",

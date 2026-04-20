@@ -111,10 +111,35 @@ def _parse_sync_metadata(field_value: str) -> dict:
 def build_index(anki: AnkiConnect, cfg: Config) -> AnkiIndex:
     """Query every note in deck_root with the configured note type, plus
     each note's sub-deck membership. Returns the populated index."""
-    query = f'deck:"{cfg.deck_root}" "note:{cfg.note_type}"'
+    # Anki search syntax: `note:"<value>"` — quotes wrap the value, not the
+    # whole field:value token. The earlier (broken) form `"note:..."` matched
+    # the literal string and returned zero notes.
+    query = f'deck:"{cfg.deck_root}" note:"{cfg.note_type}"'
     note_ids = anki.find_notes(query)
     if not note_ids:
-        return AnkiIndex.empty()
+        # Diagnose. The two common causes are: (a) deck name typo, (b) note
+        # type name has invisible whitespace (Anki allows trailing spaces).
+        all_decks = anki.deck_names()
+        all_models = anki.invoke("modelNames") or []
+        deck_hits = [d for d in all_decks if d == cfg.deck_root]
+        model_hits = [m for m in all_models if m == cfg.note_type]
+        looks_like_models = [m for m in all_models if m.strip() == cfg.note_type.strip()]
+        msg = [
+            f"Query returned 0 notes: {query!r}",
+            f"  deck   '{cfg.deck_root}' exists in Anki: {bool(deck_hits)}",
+            f"  model  '{cfg.note_type}' exists in Anki: {bool(model_hits)}",
+        ]
+        if not model_hits and looks_like_models:
+            msg.append(
+                "  ⚠ Models with the same name modulo whitespace exist:"
+            )
+            for m in looks_like_models:
+                msg.append(f"      {m!r}  (len={len(m)})")
+            msg.append(
+                "  → Update note_type in anki_sync_config.json to match exactly, "
+                "including any trailing/leading spaces."
+            )
+        raise RuntimeError("\n".join(msg))
 
     infos = anki.notes_info(note_ids)
 
