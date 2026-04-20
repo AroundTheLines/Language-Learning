@@ -1,0 +1,103 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# ─── Project artifacts (no CSVs / no source binaries / no derived data) ───
+# All CSV files: Kindle exports, intermediate, translated, by-color outputs,
+# sample/addendum vocab lists. Code is the only thing committed.
+*.csv
+
+# EPUB / Kindle source binaries
+*.epub
+*.azw
+*.azw3
+*.mobi
+*.kfx
+
+# Pipeline output directories
+spanish_kindle_exports/highlight_csvs/
+spanish_kindle_exports/enriched/
+spanish_kindle_exports/translated/
+spanish_kindle_exports/by_color/
+
+# Source books (large binaries)
+books/
+
+# Stray HTML notebook exports / scratch
+*.html
+
+# Anki sync runtime state (regenerable via anki_sync/anki_rebuild_state.py)
+anki_sync/state/
+
+# Sync run logs
+anki_sync/logs/
+
+# Claude Code local settings
+.claude/

@@ -1,0 +1,53 @@
+{
+  "_comment": "Configuration for anki_sync. Field names match the Anki note type 2.1. Spanish Picture Words exactly. Edit with care: changing a field name here without renaming in Anki (or vice versa) will break the sync.",
+
+  "deck_root": "Intensive Spanish Deck",
+  "subdecks": {
+    "new_destination":  "Intensive Spanish Deck::WIP Spanish Deck",
+    "active_for_update": [
+      "Intensive Spanish Deck::Finalized Spanish Deck",
+      "Intensive Spanish Deck::WIP Spanish Deck"
+    ],
+    "veto":             "Intensive Spanish Deck::Unused Spanish Deck"
+  },
+
+  "note_type": "2.1. Spanish Picture Words",
+
+  "id_format": {
+    "prefix":  "LX-",
+    "padding": 6
+  },
+
+  "sync_metadata_field": "Sync Metadata",
+  "previous_lemmas_field": "Previous Lemmas",
+  "id_field": "ID",
+  "key_field": "Word",
+
+  "field_mapping": {
+    "Word":                                   { "csv": "lemma",            "policy": "key" },
+    "English Translation":                    { "csv": "translation",      "policy": "create_only" },
+    "Pronunciation (Recording and/or IPA)":   { "csv": "ipa",              "policy": "create_only" },
+    "Gender":                                 { "csv": "word_type",        "policy": "create_only" },
+    "Auto-Generated Context":                 { "csv": "personal_context", "policy": "managed_bullet_union" },
+    "Personal Context":                       { "csv": null,               "policy": "never_touch" },
+    "Picture":                                { "csv": null,               "policy": "never_touch" },
+    "Test Spelling? (y = yes, blank = no)":   { "csv": null,               "policy": "never_touch" },
+    "ID":                                     { "csv": null,               "policy": "sync_internal" },
+    "Previous Lemmas":                        { "csv": null,               "policy": "sync_internal" },
+    "Sync Metadata":                          { "csv": null,               "policy": "sync_internal" }
+  },
+
+  "tags": {
+    "policy": "add_only",
+    "source_from_filename": true,
+    "color_from_filename": true,
+    "extra_tags": []
+  },
+
+  "filename_parser": {
+    "_comment": "by_color filenames look like: 2026-04-13-percy_jackson_yellow.csv. The date prefix becomes the import date (informational), the middle becomes the source tag, and the trailing token (after the last underscore, before .csv) becomes the color tag.",
+    "regex": "^(?P<date>\\d{4}-\\d{2}-\\d{2})-(?P<source>.+)_(?P<color>[^_]+)$"
+  },
+
+  "state_file": "anki_sync/state/anki_sync_state.json"
+}
