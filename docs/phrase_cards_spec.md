@@ -19,7 +19,7 @@ Additionally: I often highlight without adding a personal note, because noting i
 
 ## 2. Goals
 
-- Every orange highlight becomes exactly one Anki note.
+- Every unique orange highlight (by dedup key per §6) becomes exactly one Anki note. Re-highlights of the same phrase merge into the existing note.
 - Cards follow Fluent Forever principles: no English on the front, recognition-only (no production cards), minimum-information per card.
 - Personal notes are preserved verbatim when present, never required.
 - Missing notes are compensated by an LLM-generated objective explanation — so every card has depth, with or without my input.
@@ -59,6 +59,8 @@ Additionally: I often highlight without adding a personal note, because noting i
 - `Personal Note` — verbatim from the CSV's `note_text` column when present. Blank when not. Never LLM-touched.
 - `Source` — book + location footer.
 
+Display order on the back is defined by the Anki card template, not this spec. The field list above is the set of fields that must appear; the template decides layout.
+
 ### 4.5 Insight style guide
 - Spanish-dominant. English is used for quick comparison and glosses — e.g., to say "this is a literary use of future tense (≈ *you see*)" — not for full-sentence explanations.
 - Objective/linguistic in tone: what construction is it, what does it do, where else would I see it.
@@ -76,6 +78,8 @@ Additionally: I often highlight without adding a personal note, because noting i
 **Anki note type name**: `2.2. Spanish Phrases` — no trailing whitespace. Yellow's `"2.1. Spanish Picture Words "` has a trailing space that is treated as a historical accident, not a convention to propagate. Future note types follow the no-trailing-whitespace rule.
 
 **Model**: Cloze
+
+**Who creates the note type**: user, manually in Anki, before first sync. Follows the yellow precedent (`anki_bootstrap.py` handles pre-existing notes, not model creation). The sync pipeline does not call `createModel` via AnkiConnect. Field names must match this spec exactly — typos will cause silent sync failures similar to the trailing-whitespace incident captured in the yellow config's `_note_type_warning`. Recommended check after creation: run the sync in dry-run mode; it should find zero existing notes but confirm the model and fields resolve.
 
 | Field | Purpose | Sync policy |
 |---|---|---|
@@ -95,13 +99,14 @@ Additionally: I often highlight without adding a personal note, because noting i
 
 | Role | Deck | Notes |
 |---|---|---|
-| New destination for phrase notes | `Intensive Spanish Deck::Cloze Spanish Deck` | New peer sub-deck. First home for all new phrase cloze notes. |
-| Default permanent home | Same — `Cloze Spanish Deck` | Most phrase notes live here forever. No automatic graduation to Finalized. |
+| New destination and default permanent home | `Intensive Spanish Deck::Cloze Spanish Deck` | New peer sub-deck. First home for all new phrase cloze notes; most live here forever with no automatic graduation to Finalized. |
 | Veto target | `Intensive Spanish Deck::Unused Spanish Deck` | Shared with yellow. |
 | Manual graduation target (optional) | `Intensive Spanish Deck::WIP Spanish Deck` | User moves a phrase note here when it needs editing or personal context. Shared with yellow. |
 | Manual graduation target (optional) | `Intensive Spanish Deck::Finalized Spanish Deck` | User may promote here after review. Shared with yellow. |
 
 `active_for_update` for phrase sync must include Cloze + WIP + Finalized — bullet-union updates to `Personal Note` should still land wherever the user has moved the note. `veto` = Unused. `Unused` and the manual graduation targets are shared across both pipelines; deck membership is resolved by note type, not deck name.
+
+**Shared-deck query invariant**: because Unused/WIP/Finalized hold both yellow and phrase notes, every sync query must filter by *both* deck and note type — `deck:"..." note:"..."` — never deck-only. A deck-only query would return the other pipeline's notes and cross-contaminate updates. This is load-bearing; don't drop the note-type filter anywhere in the query path.
 
 A single daily review cap is configured on the root `Intensive Spanish Deck` in Anki itself, applies across both note types. Anki-side concern, not in this spec.
 
@@ -111,13 +116,17 @@ A single daily review cap is configured on the root `Intensive Spanish Deck` in 
 
 **Key**: normalized phrase text. Normalization applies only for matching; the stored `Cloze Sentence` preserves original casing and punctuation.
 
-**Normalization steps**:
-- Trim leading/trailing whitespace.
-- Lowercase.
-- Strip leading Spanish opening punctuation: `¿`, `¡`.
-- Strip trailing punctuation: `.`, `!`, `?`, `…`, `,`, `;`, `:`.
+**Normalization steps** (applied in this order):
+1. Convert all Unicode whitespace (non-breaking space `U+00A0`, em-space, tab, etc.) to ASCII space.
+2. Collapse runs of multiple spaces to a single space.
+3. Trim leading/trailing whitespace.
+4. Lowercase.
+5. Strip leading Spanish opening punctuation: `¿`, `¡`, and any combinations thereof.
+6. Strip trailing punctuation: `.`, `!`, `?`, `…`, `,`, `;`, `:`, quotation marks.
+
+**Must-not rules**:
 - **Do not fold accents.** *"sé"* vs *"se"* and *"mas"* vs *"más"* are semantically distinct in Spanish; collapsing them would create false-positive dedup collisions.
-- **Do not collapse internal whitespace beyond single spaces.** Multi-space runs become single spaces; no other internal changes.
+- **Do not alter internal punctuation.** Only leading/trailing punctuation in the step list above is stripped.
 
 **On re-highlight of the same phrase**:
 - `Personal Note` unions (bullet-merge, same mechanism as `Auto-Generated Context` in yellow). Multiple highlights of the same phrase can accumulate personal notes over time.
@@ -132,11 +141,11 @@ This section captures what the enrichment step must produce, not *how* to prompt
 
 **Input**:
 - `phrase` (CSV `lemma`)
-- `context_sentence` (CSV `context_sentences`, first entry)
+- `context_sentence` — the first bullet in the CSV's `context_sentences` column, after splitting on `• `. The upstream pipeline (`enrich_highlights.py` / `translate_and_deduplicate.py`) orders context sentences by earliest occurrence in the source book, so "first bullet" = "earliest occurrence." If upstream ordering ever changes, this contract has to be revisited.
 - optional `personal_note` (CSV `note_text`)
 
 **Output** (structured JSON, strict schema):
-- `cloze_spans`: list of 1–3 `(start, end)` index pairs within `context_sentence` to wrap in cloze markers. Must be non-overlapping, must not contain `::` or `}}`.
+- `cloze_spans`: list of 1–3 `(start, end)` index pairs within `context_sentence` to wrap in cloze markers. Indices are Python-`str` character offsets (Unicode code points), end-exclusive — the same semantics as Python slicing. Not byte offsets, not grapheme clusters. Spans must be non-overlapping, must not contain `::` or `}}`.
 - `cloze_hints`: list of short Spanish-only hints, one per span, same length as `cloze_spans`.
 - `insight`: 1–2 line mixed Spanish/English linguistic note.
 - `alternatives`: 1–2 tight paraphrases, each with a terse English annotation.
@@ -173,6 +182,7 @@ These are explicitly deferred from card design:
    - LLM returns malformed JSON (should not happen with structured outputs, but guard anyway).
    - LLM picks `cloze_spans` that don't map to valid substrings of `context_sentence`.
    - LLM emits `::` or `}}` inside a cloze answer or hint — must reject and regenerate or drop the offending span.
+   - `cloze_spans` and `cloze_hints` have mismatched lengths (§7 requires them to be equal).
    - LLM returns empty `insight`, empty `alternatives`, or a translation that's obviously identical to the Spanish.
    - Overlapping cloze spans.
    - Phrase not found within its own context sentence (CSV corruption or post-hoc edit).
