@@ -28,6 +28,7 @@ import json
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from csv_to_ipa import word_to_ipa
@@ -43,6 +44,19 @@ try:
 except ImportError:
     print("Missing dependency. Run: pip install deepl")
     sys.exit(1)
+
+
+# Optional progress bar. Import lazily so this script keeps working even if
+# anki_sync is not on sys.path.
+def _progress(total: int, label: str):
+    try:
+        _project_root = Path(__file__).parent.parent
+        if str(_project_root) not in sys.path:
+            sys.path.insert(0, str(_project_root))
+        from anki_sync.progress import Progress
+        return Progress(total, label=label)
+    except ImportError:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -158,70 +172,102 @@ def _get_lemma_stanza(word: str, context_sentence: str = "") -> str:
 
 _LEMMA_BATCH_SIZE = 50
 _MAX_CONTEXT_LEN = 200
+_LEMMATISE_CONCURRENCY = int(os.environ.get("LEMMATISE_CONCURRENCY", "4"))
+
+
+def _lemmatise_one_batch(
+    client, batch_start: int, batch: list[tuple[str, str]]
+) -> dict[int, str]:
+    """One LLM round-trip. Returns index → lemma for successes; logs and
+    returns an empty dict on failure."""
+    lines = []
+    for j, (word, ctx) in enumerate(batch):
+        idx = batch_start + j
+        if ctx:
+            ctx_short = ctx[:_MAX_CONTEXT_LEN]
+            lines.append(f'{idx}. {word} | Context: "{ctx_short}"')
+        else:
+            lines.append(f"{idx}. {word}")
+
+    prompt = (
+        "You are a Spanish lemmatizer. For each numbered word, return its "
+        "dictionary headword:\n"
+        "- Conjugated verbs → infinitive (esquivó → esquivar, tengo → tener)\n"
+        "- Reflexive verb forms → infinitive + se "
+        "(meterme → meterse, despertándose → despertarse)\n"
+        "- Feminine/plural nouns or adjectives → masculine singular "
+        "(bonita → bonito, gatos → gato)\n"
+        "- Words already in dictionary form → return unchanged\n"
+        "- Use the context sentence (when provided) to disambiguate\n\n"
+        "Return ONLY a JSON object mapping each number to its lemma. "
+        'Example: {"0": "esquivar", "1": "meterse"}\n\n'
+        + "\n".join(lines)
+    )
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        json_match = re.search(r"\{[\s\S]*\}", text)
+        if not json_match:
+            return {}
+        parsed = json.loads(json_match.group())
+        return {int(k): _clean_lemma(str(v).strip()) for k, v in parsed.items()}
+    except Exception as e:
+        print(
+            f"  Warning: LLM lemmatisation failed for batch at {batch_start}: {e}",
+            file=sys.stderr,
+        )
+        return {}
 
 
 def _batch_lemmatise_llm(
     entries: list[tuple[str, str]],
 ) -> dict[int, str]:
     """
-    Use Claude API (Haiku) to lemmatise a batch of Spanish words.
+    Use Claude API (Haiku) to lemmatise a list of Spanish words in parallel.
     entries: list of (cleaned_word, context_sentence) tuples.
     Returns: dict mapping entry-index → lemma for successful results.
+
+    Slices into 50-word batches and dispatches them to a ThreadPoolExecutor.
+    Each batch is one Anthropic round-trip; running 4 in parallel roughly
+    quarters wall-clock for any run with ≥4 batches.
     """
     import anthropic
 
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     client = anthropic.Anthropic(api_key=api_key)
+
+    batches = [
+        (start, entries[start : start + _LEMMA_BATCH_SIZE])
+        for start in range(0, len(entries), _LEMMA_BATCH_SIZE)
+    ]
+    if not batches:
+        return {}
+
     results: dict[int, str] = {}
+    prog = _progress(len(entries), "lemmatising (Claude)")
+    workers = max(1, min(_LEMMATISE_CONCURRENCY, len(batches)))
 
-    for batch_start in range(0, len(entries), _LEMMA_BATCH_SIZE):
-        batch = entries[batch_start : batch_start + _LEMMA_BATCH_SIZE]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="lemma") as pool:
+        futs = {
+            pool.submit(_lemmatise_one_batch, client, start, batch): (start, batch)
+            for start, batch in batches
+        }
+        for fut in as_completed(futs):
+            start, batch = futs[fut]
+            partial = fut.result()
+            results.update(partial)
+            if prog:
+                # Advance by the whole batch size so the bar reflects words,
+                # not batches — gives more granular feedback on long runs.
+                prog.update(n=len(batch), detail=f"batch@{start}")
 
-        lines = []
-        for j, (word, ctx) in enumerate(batch):
-            idx = batch_start + j
-            if ctx:
-                ctx_short = ctx[:_MAX_CONTEXT_LEN]
-                lines.append(f'{idx}. {word} | Context: "{ctx_short}"')
-            else:
-                lines.append(f"{idx}. {word}")
-
-        prompt = (
-            "You are a Spanish lemmatizer. For each numbered word, return its "
-            "dictionary headword:\n"
-            "- Conjugated verbs → infinitive (esquivó → esquivar, tengo → tener)\n"
-            "- Reflexive verb forms → infinitive + se "
-            "(meterme → meterse, despertándose → despertarse)\n"
-            "- Feminine/plural nouns or adjectives → masculine singular "
-            "(bonita → bonito, gatos → gato)\n"
-            "- Words already in dictionary form → return unchanged\n"
-            "- Use the context sentence (when provided) to disambiguate\n\n"
-            "Return ONLY a JSON object mapping each number to its lemma. "
-            'Example: {"0": "esquivar", "1": "meterse"}\n\n'
-            + "\n".join(lines)
-        )
-
-        try:
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text
-            # Extract JSON from the response (may be wrapped in markdown fences)
-            json_match = re.search(r"\{[\s\S]*\}", text)
-            if json_match:
-                parsed = json.loads(json_match.group())
-                for k, v in parsed.items():
-                    results[int(k)] = _clean_lemma(str(v).strip())
-        except Exception as e:
-            print(f"  Warning: LLM lemmatisation failed for batch at {batch_start}: {e}")
-            continue
-
-        pct = min(batch_start + len(batch), len(entries)) / len(entries) * 100
-        print(f"  LLM lemmatising … {pct:.0f}%", end="\r")
-
-    print()
+    if prog:
+        prog.close()
     return results
 
 
@@ -432,25 +478,58 @@ def check_usage(api_key: str) -> tuple[int, int]:
     return used, limit
 
 
+_TRANSLATE_CONCURRENCY = int(os.environ.get("DEEPL_CONCURRENCY", "8"))
+"""In-flight DeepL calls. DeepL Free tolerates ~8 concurrent requests
+comfortably; Pro tolerates more. Override via env var."""
+
+
 def translate_batch(translator: deepl.Translator, groups: list[dict]) -> None:
     """
     Translate each group's lemma in-place. The lemma is what gets sent to
     DeepL (with the first context sentence for word-sense disambiguation).
+
+    Runs calls concurrently — each DeepL call is a sub-second network
+    round-trip, so an 8-way pool drops wall-clock roughly proportionally for
+    batches over ~20 items. The DeepL SDK does not officially document
+    thread-safety, but it wraps `requests.Session` and is empirically safe
+    for independent `translate_text` calls (no shared per-request mutable
+    state). If you ever see DeepL-side ordering issues, drop
+    `DEEPL_CONCURRENCY=1` or swap in one `Translator` per worker.
     """
-    total = len(groups)
-    for i, g in enumerate(groups):
-        if i % REPORT_EVERY == 0:
-            print(f"  Translating item {i + 1} of {total}...")
+    if not groups:
+        return
 
+    prog = _progress(len(groups), "translating (DeepL)")
+
+    def _one(g: dict) -> tuple[dict, str | Exception]:
         context_str = g["context_sentences"][0] if g["context_sentences"] else None
+        try:
+            result = translator.translate_text(
+                g["lemma"],
+                source_lang="ES",
+                target_lang="EN-US",
+                context=context_str,
+            )
+            return g, result.text
+        except Exception as e:  # pragma: no cover - network path
+            return g, e
 
-        result = translator.translate_text(
-            g["lemma"],
-            source_lang="ES",
-            target_lang="EN-US",
-            context=context_str,
-        )
-        g["translation"] = result.text
+    workers = max(1, min(_TRANSLATE_CONCURRENCY, len(groups)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="deepl") as pool:
+        futs = [pool.submit(_one, g) for g in groups]
+        for fut in as_completed(futs):
+            g, outcome = fut.result()
+            if isinstance(outcome, Exception):
+                # Preserve existing behavior's fail-loud feel but don't abort
+                # the remaining in-flight requests.
+                print(f"  ⚠ DeepL failure on {g['lemma']!r}: {outcome}", file=sys.stderr)
+                g["translation"] = ""
+            else:
+                g["translation"] = outcome
+            if prog:
+                prog.update(detail=g["lemma"])
+    if prog:
+        prog.close()
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +539,7 @@ def translate_batch(translator: deepl.Translator, groups: list[dict]) -> None:
 
 def add_ipa(groups: list[dict]) -> None:
     """Fill in the 'ipa' field from the lemma for single-word groups."""
+    prog = _progress(len(groups), "adding IPA")
     for g in groups:
         if " " in g["lemma"]:
             g["ipa"] = ""
@@ -468,6 +548,10 @@ def add_ipa(groups: list[dict]) -> None:
                 g["ipa"] = word_to_ipa(g["lemma"], "es")
             except Exception:
                 g["ipa"] = ""
+        if prog:
+            prog.update(detail=g["lemma"])
+    if prog:
+        prog.close()
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +660,7 @@ def _feminine_form(masc: str) -> str:
 
 def add_word_type(groups: list[dict]) -> None:
     """Fill in the 'word_type' field from the lemma for single-word groups."""
+    prog = _progress(len(groups), "adding word types")
     for g in groups:
         if " " in g["lemma"]:
             g["word_type"] = ""
@@ -587,6 +672,10 @@ def add_word_type(groups: list[dict]) -> None:
                 if fem != g["lemma"]:
                     g["lemma"] = f"{g['lemma']}/{fem}"
             g["word_type"] = wt
+        if prog:
+            prog.update(detail=g["lemma"])
+    if prog:
+        prog.close()
 
 
 # ---------------------------------------------------------------------------

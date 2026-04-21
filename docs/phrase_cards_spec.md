@@ -55,6 +55,7 @@ Additionally: I often highlight without adding a personal note, because noting i
 - Revealed cloze answer(s).
 - `Translation` — English of the full sentence.
 - `Insight` — LLM-generated, Spanish-dominant with English glosses woven in. Tight: 1–2 lines.
+- `Explanation` — LLM-generated, plain-English gloss of what the phrase/saying means and when a native speaker would use it. 1–2 sentences. Distinct from `Translation` (which renders the sentence) and from `Insight` (which frames the grammar). This is the fallback when the Spanish-dominant `Insight` is too dense to parse mid-review.
 - `Alternatives` — 1–2 paraphrases in Spanish with terse English. Very tight. One line each max.
 - `Personal Note` — verbatim from the CSV's `note_text` column when present. Blank when not. Never LLM-touched.
 - `Source` — book + location footer.
@@ -65,6 +66,13 @@ Display order on the back is defined by the Anki card template, not this spec. T
 - Spanish-dominant. English is used for quick comparison and glosses — e.g., to say "this is a literary use of future tense (≈ *you see*)" — not for full-sentence explanations.
 - Objective/linguistic in tone: what construction is it, what does it do, where else would I see it.
 - Examples of good insight content: "fixed expression," "colloquial filler," "subjunctive triggered by X," "dative of interest," "literary framing use of future."
+
+### 4.5a Explanation style guide
+- Plain English. No Spanish vocabulary except when quoting the phrase itself.
+- Focuses on **meaning and situational use** of the saying, not grammar. Answer: "what does it mean, and when would I hear it?"
+- 1–2 sentences. A learner scanning the back of a card should understand the phrase in under five seconds.
+- Must not duplicate `Translation` (sentence-level) or `Insight` (grammar framing). If the phrase is non-idiomatic and the translation already conveys everything, `Explanation` should still add context — e.g., "Common tag question used to seek agreement, like English 'right?' or 'you know?'".
+- Examples: "Common conversational filler used to soften a disagreement, similar to English 'look,' or 'the thing is.'"; "Fixed expression meaning 'just in case,' used before a preventive action."
 
 ### 4.6 Alternatives style guide
 - 1–2 ways a native might rephrase the same thing.
@@ -86,6 +94,7 @@ Display order on the back is defined by the Anki card template, not this spec. T
 | `Cloze Sentence` | Context sentence with `{{cN::answer::hint}}` markup. Drives the front. | `create_only` |
 | `Translation` | English of the full sentence. | `create_only` |
 | `Insight` | LLM-generated linguistic note, mixed Spanish/English. | `create_only` |
+| `Explanation` | LLM-generated plain-English gloss of meaning/usage. Sibling of `Insight`. | `create_only` |
 | `Alternatives` | 1–2 tight paraphrases. | `create_only` |
 | `Personal Note` | User's `note_text` from CSV. Union-merged across re-highlights. | `managed_bullet_union` |
 | `Source` | Book + location, first-seen only. | `create_only` |
@@ -120,13 +129,12 @@ A single daily review cap is configured on the root `Intensive Spanish Deck` in 
 1. Convert all Unicode whitespace (non-breaking space `U+00A0`, em-space, tab, etc.) to ASCII space.
 2. Collapse runs of multiple spaces to a single space.
 3. Trim leading/trailing whitespace.
-4. Lowercase.
-5. Strip leading Spanish opening punctuation: `¿`, `¡`, and any combinations thereof.
-6. Strip trailing punctuation: `.`, `!`, `?`, `…`, `,`, `;`, `:`, quotation marks.
+4. Lowercase (casefold).
 
 **Must-not rules**:
 - **Do not fold accents.** *"sé"* vs *"se"* and *"mas"* vs *"más"* are semantically distinct in Spanish; collapsing them would create false-positive dedup collisions.
-- **Do not alter internal punctuation.** Only leading/trailing punctuation in the step list above is stripped.
+- **Do not strip punctuation.** Unlike yellow's word-level dedup, phrase keys preserve `¿`, `¡`, `.`, `!`, `?`, `…`, `,`, `;`, `:`, and quotation marks verbatim. Phrase cards are about *how* Spanish uses a construction, and punctuation carries meaning — *"¿Verdad?"* as a confirmation tag is a different phenomenon than *"verdad"* as a noun. Treating them as one key would collapse teachable distinctions. Trade-off: if the same phrase is highlighted once with a trailing period and once without, it becomes two notes; fine, the user can merge manually if needed.
+- **Do not alter internal punctuation.**
 
 **On re-highlight of the same phrase**:
 - `Personal Note` unions (bullet-merge, same mechanism as `Auto-Generated Context` in yellow). Multiple highlights of the same phrase can accumulate personal notes over time.
@@ -148,6 +156,7 @@ This section captures what the enrichment step must produce, not *how* to prompt
 - `cloze_spans`: list of 1–3 `(start, end)` index pairs within `context_sentence` to wrap in cloze markers. Indices are Python-`str` character offsets (Unicode code points), end-exclusive — the same semantics as Python slicing. Not byte offsets, not grapheme clusters. Spans must be non-overlapping, must not contain `::` or `}}`.
 - `cloze_hints`: list of short Spanish-only hints, one per span, same length as `cloze_spans`.
 - `insight`: 1–2 line mixed Spanish/English linguistic note.
+- `explanation`: 1–2 sentence plain-English gloss of what the phrase means and when a native would use it. Distinct from `translation` and `insight` per §4.5a.
 - `alternatives`: 1–2 tight paraphrases, each with a terse English annotation.
 - `translation`: English of the full sentence.
 
@@ -157,16 +166,18 @@ This section captures what the enrichment step must produce, not *how* to prompt
 - Must not regenerate for a phrase key that already exists in sync state (see §6).
 - Prompt cache reuse: the system prompt / style guide should be held constant across calls to benefit from caching.
 
-## 8. Review/edit UX — requirements
+## 8. Review UX — in Anki
 
-At card-creation time (before notes hit Anki), I want a lightweight review pass where I can:
-- See the auto-generated `Cloze Sentence`, `Insight`, `Alternatives`, `Translation` side-by-side with the source.
-- Edit any field inline.
-- Approve → note is created in the Cloze sub-deck. Skip → route to Unused.
+Review happens **in Anki, not before sync**. Every enriched phrase is pushed as a note; the reviewer curates after the fact. Rationale: the LLM output is good enough to trust as a first draft, and reviewing in Anki keeps the loop tight — the same surface the card will be studied on is the surface it's edited on.
 
-**Source-of-truth after first creation**: Anki wins. Once a note exists, the CSV is no longer authoritative for any field except `Personal Note` (which union-merges on re-highlight). Re-running the sync on the same CSV must not clobber Anki-side edits — the `create_only` policies on `Cloze Sentence`, `Insight`, `Alternatives`, `Translation`, `Source` enforce this.
+Post-sync curation uses tools Anki already provides:
+- **Edit a field**: open the note in the browser, edit `Cloze Sentence` / `Insight` / `Explanation` / `Alternatives` / `Translation` directly. `create_only` sync policies guarantee these edits survive any future re-sync.
+- **Demote an unwanted card**: move the note to `Intensive Spanish Deck::Unused Spanish Deck`. The sync's `veto` rule prevents future re-creation of the same phrase key.
+- **Promote / park**: move the note to `WIP Spanish Deck` (needs more work) or `Finalized Spanish Deck` (polished). Shared with yellow; note-type filtering keeps the two pipelines from crossing over.
 
-Implementation is pipeline work. Could be a CSV edit loop, a TUI, or a pre-sync JSON file. Lowest-friction option preferred.
+**Source-of-truth after first creation**: Anki wins. Once a note exists, the CSV is no longer authoritative for any field except `Personal Note` (which union-merges on re-highlight). Re-running the sync on the same CSV does not clobber Anki-side edits — the `create_only` policies on `Cloze Sentence`, `Translation`, `Insight`, `Explanation`, `Alternatives`, `Source` enforce this.
+
+**No pre-sync gate**: the enriched CSV has no `status` column. `enrich_phrases.py` emits a CSV; `phrase_sync.py` consumes every row of it unconditionally.
 
 ## 9. Open questions for pipeline phase
 

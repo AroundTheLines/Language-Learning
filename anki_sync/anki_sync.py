@@ -58,12 +58,14 @@ if __package__ in (None, ""):
     from anki_sync.anki_index import AnkiIndex, NoteRecord, build_index
     from anki_sync.bullet_merge import merge as bullet_merge
     from anki_sync.config import Config, load_config, parse_filename
+    from anki_sync.progress import Progress
     from anki_sync.state import State
 else:
     from .ankiconnect import AnkiConnect, AnkiConnectError
     from .anki_index import AnkiIndex, NoteRecord, build_index
     from .bullet_merge import merge as bullet_merge
     from .config import Config, load_config, parse_filename
+    from .progress import Progress
     from .state import State
 
 
@@ -430,6 +432,15 @@ def apply_plan(
         if ghost.id_value:
             state.mark_status(ghost.id_value, "hard_deleted")
 
+    # Count only the plans that actually perform Anki writes — NOOP and the
+    # SKIP_* variants don't touch Anki and would otherwise make the bar look
+    # artificially slow.
+    writing_actions = {
+        ACTION_CREATE, ACTION_UPDATE, ACTION_BOOTSTRAP,
+    }
+    write_total = sum(1 for p in row_plans if p.action in writing_actions)
+    prog = Progress(write_total, label="applying")
+
     for p in row_plans:
         if p.action == ACTION_CREATE:
             note_id = anki.add_note(
@@ -445,6 +456,7 @@ def apply_plan(
                 first_source=source_tag,
                 status="active",
             )
+            prog.update(detail=f"{p.action} {p.id_value} {p.lemma}")
 
         elif p.action in (ACTION_UPDATE, ACTION_BOOTSTRAP):
             if p.new_field_values:
@@ -458,6 +470,7 @@ def apply_plan(
                 first_source=source_tag,
                 status="active",
             )
+            prog.update(detail=f"{p.action} {p.id_value} {p.lemma}")
 
         elif p.action == ACTION_SKIP_VETOED:
             if p.id_value:
@@ -468,13 +481,16 @@ def apply_plan(
                     first_source=source_tag,
                     status="vetoed",
                 )
+            prog.update(detail=f"{p.action} {p.id_value}")
 
         elif p.action == ACTION_SKIP_DELETED:
             if p.id_value:
                 state.mark_status(p.id_value, "hard_deleted")
+            prog.update(detail=f"{p.action} {p.id_value}")
 
         # NOOP and DETECT_DELETE handled elsewhere.
 
+    prog.close()
     state.save()
 
 

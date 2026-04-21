@@ -12,6 +12,10 @@ Scripts:
   anki_discover        — read-only introspection of the Anki collection.
   anki_bootstrap       — one-time migration: assign IDs to existing notes and
                          audit Auto-Generated Context for hand-edits.
-  anki_sync            — main sync (dry-run by default; --apply to commit).
+  anki_sync            — main sync for the yellow (word) pipeline.
+  enrich_phrases       — stage 1 of the orange (phrase) pipeline: LLM
+                         enrichment into a reviewable CSV.
+  phrase_sync          — stage 2 of the orange pipeline: sync reviewed
+                         enriched CSV into Anki.
   anki_rebuild_state   — disaster recovery: rebuild state file from Anki.
 """

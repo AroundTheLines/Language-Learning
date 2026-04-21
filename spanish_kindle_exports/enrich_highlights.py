@@ -182,6 +182,17 @@ def find_contexts(highlights: list[dict], full_text: str) -> list[str]:
     at or after the previous match position. Returns a list of context
     sentences in the same order as highlights.
     """
+    # Progress helper lives in the sibling package; import lazily so this
+    # script still runs if anki_sync is not on sys.path (unlikely but cheap
+    # to guard).
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        _sys.path.insert(0, str(_Path(__file__).parent.parent))
+        from anki_sync.progress import Progress
+    except ImportError:
+        Progress = None  # type: ignore
+
     # Pre-normalise the full corpus once
     norm_full = _normalise(full_text)
 
@@ -193,18 +204,22 @@ def find_contexts(highlights: list[dict], full_text: str) -> list[str]:
     cursor = 0  # position in norm_full; advances after each successful match
     contexts = []
 
+    prog = Progress(len(highlights), label="matching highlights") if Progress else None
+
     for row in highlights:
         highlight = row.get("highlight_text", "").strip()
 
         # Skip empty highlights (note-only rows)
         if not highlight:
             contexts.append("")
+            if prog: prog.update()
             continue
 
         norm_highlight = _normalise(highlight)
 
         if not norm_highlight:
             contexts.append("")
+            if prog: prog.update()
             continue
 
         # Search from cursor onward
@@ -222,6 +237,7 @@ def find_contexts(highlights: list[dict], full_text: str) -> list[str]:
 
         if pos == -1:
             contexts.append("[not found in EPUB]")
+            if prog: prog.update(detail=f"not found: {highlight[:40]}")
             continue
 
         norm_end = pos + len(norm_highlight)
@@ -235,6 +251,10 @@ def find_contexts(highlights: list[dict], full_text: str) -> list[str]:
 
         # Advance cursor past this match so next highlight starts here
         cursor = norm_end
+        if prog: prog.update(detail=highlight[:40])
+
+    if prog:
+        prog.close()
 
     return contexts
 
