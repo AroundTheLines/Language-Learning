@@ -117,13 +117,23 @@ def build_index(anki: AnkiConnect, cfg: Config) -> AnkiIndex:
     query = f'deck:"{cfg.deck_root}" note:"{cfg.note_type}"'
     note_ids = anki.find_notes(query)
     if not note_ids:
-        # Diagnose. The two common causes are: (a) deck name typo, (b) note
-        # type name has invisible whitespace (Anki allows trailing spaces).
+        # Zero notes is ambiguous: either (a) the deck/model genuinely holds
+        # no managed notes yet (fine — happens on day one of a new note
+        # type), or (b) a name mismatch caused the query to miss. Disambiguate
+        # by checking deck + model existence. Only raise on (b).
         all_decks = anki.deck_names()
         all_models = anki.invoke("modelNames") or []
         deck_hits = [d for d in all_decks if d == cfg.deck_root]
         model_hits = [m for m in all_models if m == cfg.note_type]
-        looks_like_models = [m for m in all_models if m.strip() == cfg.note_type.strip()]
+        looks_like_models = [
+            m for m in all_models if m.strip() == cfg.note_type.strip()
+        ]
+
+        if deck_hits and model_hits:
+            # Legit empty. Return an empty index so the caller can proceed
+            # (first sync will create the first notes).
+            return AnkiIndex.empty()
+
         msg = [
             f"Query returned 0 notes: {query!r}",
             f"  deck   '{cfg.deck_root}' exists in Anki: {bool(deck_hits)}",
@@ -136,7 +146,7 @@ def build_index(anki: AnkiConnect, cfg: Config) -> AnkiIndex:
             for m in looks_like_models:
                 msg.append(f"      {m!r}  (len={len(m)})")
             msg.append(
-                "  → Update note_type in anki_sync_config.json to match exactly, "
+                "  → Update note_type in the config to match exactly, "
                 "including any trailing/leading spaces."
             )
         raise RuntimeError("\n".join(msg))

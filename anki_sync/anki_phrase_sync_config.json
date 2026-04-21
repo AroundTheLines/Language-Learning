@@ -1,0 +1,54 @@
+{
+  "_comment": "Phrase (orange-highlight) sync config. Parallel to anki_sync_config.json. Field names MUST match the 2.2. Spanish Phrases note type exactly (no trailing whitespace; see docs/phrase_cards_setup.md).",
+
+  "deck_root": "Intensive Spanish Deck",
+  "subdecks": {
+    "new_destination":  "Intensive Spanish Deck::Cloze Spanish Deck",
+    "active_for_update": [
+      "Intensive Spanish Deck::Cloze Spanish Deck",
+      "Intensive Spanish Deck::WIP Spanish Deck",
+      "Intensive Spanish Deck::Finalized Spanish Deck"
+    ],
+    "veto":             "Intensive Spanish Deck::Unused Spanish Deck"
+  },
+
+  "note_type": "2.2. Spanish Phrases",
+
+  "id_format": {
+    "prefix":  "LP-",
+    "padding": 6
+  },
+
+  "sync_metadata_field": "Sync Metadata",
+  "previous_lemmas_field": "Previous Phrases",
+  "id_field": "ID",
+  "key_field": "Phrase",
+
+  "field_mapping": {
+    "Phrase":          { "csv": "lemma",            "policy": "key" },
+    "Cloze Sentence":  { "csv": "cloze_sentence",   "policy": "create_only" },
+    "Translation":     { "csv": "translation",      "policy": "create_only" },
+    "Insight":         { "csv": "insight",          "policy": "create_only" },
+    "Explanation":     { "csv": "explanation",      "policy": "create_only" },
+    "Alternatives":    { "csv": "alternatives",     "policy": "create_only" },
+    "Personal Note":   { "csv": "personal_note",    "policy": "managed_bullet_union" },
+    "Source":          { "csv": "source",           "policy": "create_only" },
+    "ID":              { "csv": null,               "policy": "sync_internal" },
+    "Previous Phrases":{ "csv": null,               "policy": "sync_internal" },
+    "Sync Metadata":   { "csv": null,               "policy": "sync_internal" }
+  },
+
+  "tags": {
+    "policy": "add_only",
+    "source_from_filename": true,
+    "color_from_filename": true,
+    "extra_tags": []
+  },
+
+  "filename_parser": {
+    "_comment": "Same shape as yellow. The enriched CSV preserves the source stem so the color group resolves to 'orange'.",
+    "regex": "^(?P<date>\\d{4}-\\d{2}-\\d{2})-(?P<source>.+)_(?P<color>[^_]+)$"
+  },
+
+  "state_file": "anki_sync/state/anki_phrase_sync_state.json"
+}
