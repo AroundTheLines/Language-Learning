@@ -198,6 +198,11 @@ class EnrichmentResult:
     alternatives: str
     spans: list[ClozeSpan] = field(default_factory=list)
     cache_hit: bool = False
+    fallback_used: bool = False
+    """True when the LLM's cloze spans failed validation and we fell back
+    to a whole-phrase cloze. These cards have a hintless single blank
+    instead of focused spans + hints — worth flagging to the reviewer so
+    they can decide whether to hand-edit the note in Anki."""
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +363,9 @@ def _build_result(
     spans = [ClozeSpan(s, e, h) for (s, e), h in zip(spans_raw, hints)]
 
     # Try the LLM's spans first; fall back to a whole-phrase cloze if they
-    # don't validate (spec §9 #7).
+    # don't validate (spec §9 #7). Record whether the fallback fired so we
+    # can flag the row for hand-review downstream.
+    fallback_used = False
     try:
         validate_spans(context, spans)
     except ClozeError as e:
@@ -370,6 +377,18 @@ def _build_result(
         start, end = fallback
         spans = [ClozeSpan(start, end, "")]
         validate_spans(context, spans)
+        fallback_used = True
+        # Surface the degradation. The CSV also carries this via the
+        # `fallback_used` column so the reviewer sees which cards need
+        # hand-editing in Anki. Flatten any newlines in the exception
+        # message so the warning stays on a single stderr line — otherwise
+        # it can fragment the progress bar's in-place redraw.
+        err_msg = " ".join(str(e).splitlines())
+        print(
+            f"  ⚠ cloze-span fallback for {phrase!r}: {err_msg}. "
+            "Using whole-phrase cloze with no hint.",
+            file=sys.stderr,
+        )
 
     cloze_sentence = apply_clozes(context, spans)
 
@@ -383,10 +402,9 @@ def _build_result(
         raise EnrichmentError("LLM returned empty insight")
     if not explanation:
         raise EnrichmentError("LLM returned empty explanation")
-    # Alternatives may legitimately be a single paraphrase; we don't hard-fail
-    # on length. But an entirely empty field is suspect.
-    if not alternatives:
-        alternatives = ""
+    # `alternatives` may legitimately be a single paraphrase; we don't
+    # hard-fail on length. `.strip() or ""` above already covers the empty
+    # case, so no extra normalisation needed here.
 
     return EnrichmentResult(
         phrase=phrase,
@@ -397,6 +415,7 @@ def _build_result(
         explanation=explanation,
         alternatives=alternatives,
         spans=spans,
+        fallback_used=fallback_used,
     )
 
 

@@ -40,6 +40,10 @@ Columns expected by phrase_sync.py / anki_phrase_sync_config.json:
     context_sentence  — the raw context the LLM saw (for reference; sync
                         ignores this column)
     cache_hit         — "yes"/"no" — did this row reuse a cached enrichment
+    fallback_used     — "yes"/"no" — did the cloze-span validator fall back
+                        to a whole-phrase cloze. "yes" rows are worth
+                        hand-reviewing in Anki; the blank is broader than
+                        the LLM intended and carries no hint.
 
 Dedup: rows with the same normalized phrase key collapse; the earliest
 occurrence wins for context/source/enrichment. Personal notes from multiple
@@ -90,6 +94,13 @@ for Haiku; bump via --concurrency if you have a higher tier. Raising it past
 ~16 yields diminishing returns because each call is already sub-second and
 token-bound, not latency-bound, at that point."""
 
+_CACHE_SAVE_INTERVAL = 10
+"""How often to flush the enrichment cache to disk during the parallel pass.
+Saving on every completion rewrites the whole JSON file N times and gets
+expensive for large batches (O(N²) in file size). Saving every N keeps
+durability — at worst we re-bill N−1 enrichments on a crash — while
+amortising the I/O. An unconditional save runs at the end of the run."""
+
 
 OUTPUT_COLUMNS = [
     "source_stem",
@@ -104,6 +115,7 @@ OUTPUT_COLUMNS = [
     "source",
     "context_sentence",
     "cache_hit",
+    "fallback_used",
 ]
 
 
@@ -212,7 +224,7 @@ def enrich_and_write(
     *,
     offline: bool,
     concurrency: int = DEFAULT_CONCURRENCY,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, int, list[str]]:
     """Two-phase enrichment:
 
     1. Serial cache-lookup pass. Every cached phrase resolves instantly.
@@ -221,7 +233,8 @@ def enrich_and_write(
        progress, cache writes, and disk saves under a single lock.
     3. CSV write in original row order so review diffs stay stable.
 
-    Returns (num_rows_written, num_llm_calls, list_of_failure_messages).
+    Returns (num_rows_written, num_llm_calls, num_fallback_used,
+    list_of_failure_messages).
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     concurrency = max(1, concurrency)
@@ -292,6 +305,11 @@ def enrich_and_write(
                         )
                         return idx, tool_input, result
 
+                    # `calls` is only mutated from this loop, which runs on
+                    # the main thread (`as_completed` serializes delivery),
+                    # so no separate counter lock is needed.
+                    since_save = 0
+
                     with ThreadPoolExecutor(
                         max_workers=min(concurrency, len(pending)),
                         thread_name_prefix="enrich",
@@ -312,23 +330,40 @@ def enrich_and_write(
                                 continue
 
                             results[idx] = result
-                            # Main-thread-only cache mutation + save. The
-                            # lock guards against a future caller
-                            # interleaving writes; `as_completed` already
-                            # serializes deliveries, but the lock keeps the
-                            # invariant documented.
+                            # Main-thread-only cache mutation. The lock
+                            # guards against future callers that might
+                            # share the cache across threads; `as_completed`
+                            # already serializes deliveries here.
                             with cache_lock:
                                 cache.put(
                                     row.phrase_original,
                                     row.context_sentence,
                                     tool_input,
                                 )
-                                cache.save()
                                 calls += 1
-                            prog.update(detail=f"{row.phrase_original} (LLM)")
+                                since_save += 1
+                                # Amortise disk I/O: dump the JSON every
+                                # _CACHE_SAVE_INTERVAL completions instead
+                                # of every one. A crash loses at most
+                                # INTERVAL-1 cache entries, which are
+                                # just re-fetched on re-run.
+                                if since_save >= _CACHE_SAVE_INTERVAL:
+                                    cache.save()
+                                    since_save = 0
+                            suffix = "LLM*" if result.fallback_used else "LLM"
+                            prog.update(detail=f"{row.phrase_original} ({suffix})")
+
+                    # Flush any unsaved cache entries before leaving the
+                    # parallel region. The function-level `cache.save()` at
+                    # the bottom of enrich_and_write is still there as a
+                    # belt-and-suspenders final commit.
+                    if since_save > 0:
+                        with cache_lock:
+                            cache.save()
 
         # ---------- Phase 3: write CSV in input order ---------------------
         written = 0
+        fallbacks = 0
         with open(out_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
             writer.writeheader()
@@ -353,12 +388,15 @@ def enrich_and_write(
                         "source": source_field,
                         "context_sentence": result.context_sentence,
                         "cache_hit": "yes" if result.cache_hit else "no",
+                        "fallback_used": "yes" if result.fallback_used else "no",
                     }
                 )
                 written += 1
+                if result.fallback_used:
+                    fallbacks += 1
 
     cache.save()
-    return written, calls, failures
+    return written, calls, fallbacks, failures
 
 
 def _default_out_path(src: Path) -> Path:
@@ -404,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nUnique phrases (after dedup): {len(rows)}")
 
     cache = EnrichmentCache(args.cache)
-    written, calls, failures = enrich_and_write(
+    written, calls, fallbacks, failures = enrich_and_write(
         rows,
         source_stem,
         out_path,
@@ -412,17 +450,25 @@ def main(argv: list[str] | None = None) -> int:
         offline=args.offline,
         concurrency=args.concurrency,
     )
-    print(f"Enriched: {written}   LLM calls: {calls}   Cache size: {len(cache.data)}")
+    print(
+        f"Enriched: {written}   LLM calls: {calls}   "
+        f"Fallback clozes: {fallbacks}   Cache size: {len(cache.data)}"
+    )
+    if fallbacks:
+        print(
+            f"  ⚠ {fallbacks} row(s) used the whole-phrase cloze fallback. "
+            "Filter the enriched CSV on `fallback_used=yes` to find them "
+            "and hand-edit those cards in Anki if you want finer clozes."
+        )
     if failures:
         print(f"\n{len(failures)} row(s) failed:", file=sys.stderr)
         for msg in failures:
             print(f"  - {msg}", file=sys.stderr)
     print(f"\nWrote {out_path}")
     print(
-        "Next step: run phrase_sync on this CSV. Review happens in Anki\n"
+        "Next step: run phrase_sync on this CSV. Review happens in Anki "
         "after notes are created — edit fields directly on the cards, and "
-        "use\nthe Unused / WIP / Finalized sub-decks to move or demote "
-        "them."
+        "use the Unused / WIP / Finalized sub-decks to move or demote them."
     )
     return 0 if not failures else 1
 

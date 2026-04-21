@@ -91,10 +91,15 @@ def validate_spans(context: str, spans: list[ClozeSpan]) -> None:
                 f"span {idx} ({sp.start}, {sp.end}) is out of bounds for "
                 f"context of length {n} or non-positive"
             )
-        if sp.start < prev_end:
+        # Reject both strict overlap AND touching spans. Touching spans
+        # render as `{{c1::abc}}{{c2::def}}` which Anki shows as two
+        # visually-merged blanks with no gap — confusing to read and
+        # indistinguishable from a single blank. Require at least one
+        # character of context between cloze answers.
+        if sp.start <= prev_end:
             raise ClozeError(
                 f"span {idx} starts at {sp.start} but previous span ended at "
-                f"{prev_end} — spans must not overlap"
+                f"{prev_end} — spans must not overlap or touch"
             )
         prev_end = sp.end
 

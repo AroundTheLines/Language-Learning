@@ -490,8 +490,11 @@ def translate_batch(translator: deepl.Translator, groups: list[dict]) -> None:
 
     Runs calls concurrently — each DeepL call is a sub-second network
     round-trip, so an 8-way pool drops wall-clock roughly proportionally for
-    batches over ~20 items. The DeepL SDK is thread-safe (it's a thin `requests`
-    wrapper); each thread reuses the shared `translator` instance.
+    batches over ~20 items. The DeepL SDK does not officially document
+    thread-safety, but it wraps `requests.Session` and is empirically safe
+    for independent `translate_text` calls (no shared per-request mutable
+    state). If you ever see DeepL-side ordering issues, drop
+    `DEEPL_CONCURRENCY=1` or swap in one `Translator` per worker.
     """
     if not groups:
         return

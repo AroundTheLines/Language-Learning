@@ -75,6 +75,7 @@ class Progress:
         self.tty = self.stream.isatty()
         self.start = time.monotonic()
         self._last_non_tty_pct = -1
+        self._closed = False
 
     # ------------------------------------------------------------------ API
 
@@ -89,7 +90,12 @@ class Progress:
 
     def close(self, *, final_message: str | None = None) -> None:
         """Finish the progress display. In a TTY the progress line is
-        cleared; a one-line summary is then printed."""
+        cleared; a one-line summary is then printed. Idempotent — calling
+        close() a second time (e.g. because the caller closes manually and
+        then exits a `with` block) is a no-op."""
+        if self._closed:
+            return
+        self._closed = True
         elapsed = time.monotonic() - self.start
         if self.tty:
             self.stream.write(_CLEAR_LINE)

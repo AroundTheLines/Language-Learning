@@ -69,7 +69,21 @@ def _load_rows(csv_path: Path) -> list[dict]:
     Validates that required columns exist so enrichment schema drift fails
     loudly rather than silently producing empty Anki notes.
     """
-    required = {"lemma", "source_stem", "cloze_sentence", "translation"}
+    # All columns the sync reads from (either directly, or as fields mapped
+    # into Anki). Missing `explanation` here was a real hazard: an
+    # older-schema CSV would pass validation and silently create notes with
+    # an empty Explanation field.
+    required = {
+        "source_stem",
+        "lemma",
+        "cloze_sentence",
+        "translation",
+        "insight",
+        "explanation",
+        "alternatives",
+        "personal_note",
+        "source",
+    }
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:

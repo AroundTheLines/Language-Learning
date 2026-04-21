@@ -437,7 +437,6 @@ def apply_plan(
     # artificially slow.
     writing_actions = {
         ACTION_CREATE, ACTION_UPDATE, ACTION_BOOTSTRAP,
-        ACTION_SKIP_VETOED, ACTION_SKIP_DELETED,
     }
     write_total = sum(1 for p in row_plans if p.action in writing_actions)
     prog = Progress(write_total, label="applying")
