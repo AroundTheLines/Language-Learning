@@ -95,9 +95,23 @@ Hard rules:
   like "(more casual)" or "(same function, different register)". One line
   each.
 - `cloze_spans` are Python-str character offsets (end-exclusive) into the
-  supplied `context_sentence`. They must be non-overlapping, in-bounds, and
-  inside the highlighted phrase (or, if the phrase is long, a focused
-  sub-span that captures the "huh, that's how Spanish does that" hook).
+  supplied `context_sentence`. They MUST be non-overlapping, in-bounds, and
+  fall ENTIRELY within the highlighted phrase as located in the context. The
+  user message gives you `phrase_offsets_in_context: [start, end]` — every
+  cloze span must satisfy `start >= phrase_offsets[0]` and
+  `end <= phrase_offsets[1]`. Never cloze words outside the highlighted
+  phrase, even if they look interesting; the user is studying the phrase
+  they highlighted, not adjacent material.
+- Within the highlighted phrase, default to clozing the WHOLE phrase. Pick a
+  narrower sub-span only when the phrase is long (≥5 words) AND there is a
+  clear focused "hook" inside it (an idiom, a tricky construction, the
+  surprising word). Short phrases (1–4 words) should always be clozed in
+  full.
+- `personal_note` (when present) is the user's stated reason for highlighting
+  this phrase — usually a short gloss like "= of course" or "means 'right?'".
+  Treat it as authoritative: the cloze MUST cover the part of the phrase the
+  note is about. If the note glosses the whole phrase, cloze the whole
+  phrase. Do NOT cloze a sub-span that excludes what the note refers to.
 - Never emit `::` or `}}` inside a cloze answer or hint — those break Anki.
 - Hints exist to disambiguate synonyms so the card isn't failed for the wrong
   reason; keep each under ~25 characters.
@@ -272,8 +286,30 @@ def _build_user_message(phrase: str, context: str, note: str | None) -> str:
         f"phrase: {phrase}",
         f"context_sentence: {context}",
     ]
+    # Locate the phrase inside the context so we can hand the LLM hard offset
+    # bounds for cloze selection. Without this, the LLM tends to drift away
+    # from what the user actually highlighted (e.g. clozing a different
+    # construction in the same sentence). If we can't locate it, fall back to
+    # the looser instruction in the system prompt.
+    phrase_span = find_phrase_in_context(context, phrase)
+    if phrase_span is not None:
+        start, end = phrase_span
+        parts.append(
+            f"phrase_offsets_in_context: [{start}, {end}] "
+            f"(highlighted text: {context[start:end]!r}). "
+            "Cloze spans MUST stay strictly inside this range."
+        )
+    else:
+        parts.append(
+            "phrase_offsets_in_context: (could not be located verbatim — "
+            "cloze the substring of context_sentence that best corresponds "
+            "to the phrase, and nothing else)."
+        )
     if note:
-        parts.append(f"personal_note: {note}")
+        parts.append(
+            f"personal_note (drives cloze selection — cloze MUST cover the "
+            f"part of the phrase this note is about): {note}"
+        )
     else:
         parts.append("personal_note: (none)")
     parts.append(
@@ -365,16 +401,29 @@ def _build_result(
     # Try the LLM's spans first; fall back to a whole-phrase cloze if they
     # don't validate (spec §9 #7). Record whether the fallback fired so we
     # can flag the row for hand-review downstream.
+    #
+    # We additionally enforce that every span lies within the highlighted
+    # phrase's offsets in the context. The LLM is instructed to do this in
+    # the prompt, but it sometimes drifts to nearby words; this check keeps
+    # the cloze anchored to what the user actually highlighted.
     fallback_used = False
+    phrase_span = find_phrase_in_context(context, phrase)
     try:
         validate_spans(context, spans)
+        if phrase_span is not None:
+            ph_start, ph_end = phrase_span
+            for sp in spans:
+                if sp.start < ph_start or sp.end > ph_end:
+                    raise ClozeError(
+                        f"span ({sp.start}, {sp.end}) escapes highlighted "
+                        f"phrase bounds ({ph_start}, {ph_end})"
+                    )
     except ClozeError as e:
-        fallback = find_phrase_in_context(context, phrase)
-        if fallback is None:
+        if phrase_span is None:
             raise EnrichmentError(
                 f"cloze spans invalid ({e}) and phrase not found in context"
             ) from e
-        start, end = fallback
+        start, end = phrase_span
         spans = [ClozeSpan(start, end, "")]
         validate_spans(context, spans)
         fallback_used = True

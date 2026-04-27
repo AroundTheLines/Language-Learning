@@ -142,29 +142,53 @@ def _normalise(text: str) -> str:
 _SENT_SPLIT = re.compile(r"(?<=[.!?»\"])\s+")
 
 
+_SENT_END_CHARS = ".!?»\""
+
+
 def _extract_sentence(full_text: str, match_start: int, match_end: int) -> str:
     """
     Given character offsets into full_text where the highlight was found,
     return the sentence (or short window) that contains the highlight.
+
+    If the highlight already starts at a sentence boundary, we don't pull
+    in the preceding sentence; likewise, if it ends at one, we don't pull
+    in the following sentence. This matters for orange phrase highlights
+    where the user often highlights a complete sentence — extending in
+    either direction would dilute the cloze context.
     """
-    # Search backward for sentence start
     window_start = max(0, match_start - 300)
     window_end = min(len(full_text), match_end + 300)
     left_chunk = full_text[window_start:match_start]
     right_chunk = full_text[match_end:window_end]
 
-    # Find the nearest sentence-ending punctuation to the left
-    left_boundary = max(
-        (m.end() for m in re.finditer(r"[.!?»\"]\s", left_chunk)),
-        default=0,
-    )
-    # Find the nearest sentence-ending punctuation to the right
-    right_match = re.search(r"[.!?»\"]", right_chunk)
-    right_boundary = right_match.end() if right_match else len(right_chunk)
+    highlight_text = full_text[match_start:match_end]
+    highlight_stripped = highlight_text.rstrip()
+    # If highlight already ends with sentence-ending punctuation, treat the
+    # right side as already terminated. Don't reach forward into the next
+    # sentence just because the regex finds another period there.
+    if highlight_stripped and highlight_stripped[-1] in _SENT_END_CHARS:
+        right_boundary = 0
+    else:
+        right_match = re.search(r"[.!?»\"]", right_chunk)
+        right_boundary = right_match.end() if right_match else len(right_chunk)
+
+    # If the character(s) immediately before the highlight are sentence-
+    # terminating, treat the left side as already at sentence start. The
+    # finditer-based search handles the common "punct + space" case but
+    # misses "punct" with no trailing space (e.g. when match_start lands
+    # right after a closing quote).
+    left_trimmed = left_chunk.rstrip()
+    if left_trimmed and left_trimmed[-1] in _SENT_END_CHARS:
+        left_boundary = len(left_chunk)
+    else:
+        left_boundary = max(
+            (m.end() for m in re.finditer(r"[.!?»\"]\s", left_chunk)),
+            default=0,
+        )
 
     sentence = (
         left_chunk[left_boundary:]
-        + full_text[match_start:match_end]
+        + highlight_text
         + right_chunk[:right_boundary]
     )
     sentence = re.sub(r"\s+", " ", sentence).strip()
