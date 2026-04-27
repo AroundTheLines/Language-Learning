@@ -71,8 +71,13 @@ if __package__ in (None, ""):
         _build_result,
         _call_llm,
         _load_client,
+        _stamp_schema,
+        is_cache_entry_fresh,
     )
-    from anki_sync.phrase_normalize import normalize_phrase_key
+    from anki_sync.phrase_normalize import (
+        find_phrase_in_context,
+        normalize_phrase_key,
+    )
     from anki_sync.progress import Progress
 else:
     from .llm_enrich import (
@@ -83,8 +88,13 @@ else:
         _build_result,
         _call_llm,
         _load_client,
+        _stamp_schema,
+        is_cache_entry_fresh,
     )
-    from .phrase_normalize import normalize_phrase_key
+    from .phrase_normalize import (
+        find_phrase_in_context,
+        normalize_phrase_key,
+    )
     from .progress import Progress
 
 
@@ -209,11 +219,9 @@ def collect_rows(csv_path: Path) -> list[PhraseRow]:
 
 
 def _cache_is_fresh(entry: dict | None) -> bool:
-    """A cache entry is only usable if it has the full current schema. Pre-
-    `explanation` entries count as stale — mirror the rule in
-    `llm_enrich.enrich_phrase` so cache hits resolve identically in both
-    paths."""
-    return entry is not None and bool((entry.get("explanation") or "").strip())
+    """Thin wrapper around llm_enrich.is_cache_entry_fresh — kept as a local
+    name so existing call sites and tests don't break."""
+    return is_cache_entry_fresh(entry)
 
 
 def enrich_and_write(
@@ -244,13 +252,26 @@ def enrich_and_write(
     calls = 0
 
     with Progress(len(rows), label="enriching phrases") as prog:
+        # Precompute phrase offsets in context once per row. Reused for the
+        # cache path (passed into `_build_result`) and the LLM path (passed
+        # into `_call_llm` and `_build_result`).
+        phrase_spans: list[tuple[int, int] | None] = [
+            find_phrase_in_context(r.context_sentence, r.phrase_original)
+            for r in rows
+        ]
+
         # ---------- Phase 1: satisfy cache hits ---------------------------
         pending: list[int] = []
         for i, row in enumerate(rows):
             entry = cache.get(row.phrase_original, row.context_sentence)
             if _cache_is_fresh(entry):
                 try:
-                    r = _build_result(row.phrase_original, row.context_sentence, entry)
+                    r = _build_result(
+                        row.phrase_original,
+                        row.context_sentence,
+                        entry,
+                        phrase_spans[i],
+                    )
                     r.cache_hit = True
                     results[i] = r
                     prog.update(detail=f"{row.phrase_original} (cached)")
@@ -292,16 +313,21 @@ def enrich_and_write(
                     def _worker(idx: int):
                         row = rows[idx]
                         note = row.personal_notes[0] if row.personal_notes else None
+                        ph_span = phrase_spans[idx]
                         tool_input = _call_llm(
                             client,
                             row.phrase_original,
                             row.context_sentence,
                             note,
+                            ph_span,
                         )
                         # Validate in the worker so a bad payload fails this
                         # row, not the whole batch. Raises EnrichmentError.
                         result = _build_result(
-                            row.phrase_original, row.context_sentence, tool_input
+                            row.phrase_original,
+                            row.context_sentence,
+                            tool_input,
+                            ph_span,
                         )
                         return idx, tool_input, result
 
@@ -338,7 +364,7 @@ def enrich_and_write(
                                 cache.put(
                                     row.phrase_original,
                                     row.context_sentence,
-                                    tool_input,
+                                    _stamp_schema(tool_input),
                                 )
                                 calls += 1
                                 since_save += 1

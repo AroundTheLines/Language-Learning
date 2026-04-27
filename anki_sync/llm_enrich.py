@@ -95,9 +95,23 @@ Hard rules:
   like "(more casual)" or "(same function, different register)". One line
   each.
 - `cloze_spans` are Python-str character offsets (end-exclusive) into the
-  supplied `context_sentence`. They must be non-overlapping, in-bounds, and
-  inside the highlighted phrase (or, if the phrase is long, a focused
-  sub-span that captures the "huh, that's how Spanish does that" hook).
+  supplied `context_sentence`. They MUST be non-overlapping, in-bounds, and
+  fall ENTIRELY within the highlighted phrase as located in the context. The
+  user message gives you `phrase_offsets_in_context: [start, end]` — every
+  cloze span must satisfy `start >= phrase_offsets[0]` and
+  `end <= phrase_offsets[1]`. Never cloze words outside the highlighted
+  phrase, even if they look interesting; the user is studying the phrase
+  they highlighted, not adjacent material.
+- Within the highlighted phrase, default to clozing the WHOLE phrase. Pick a
+  narrower sub-span only when the phrase is long (≥5 words) AND there is a
+  clear focused "hook" inside it (an idiom, a tricky construction, the
+  surprising word). Short phrases (1–4 words) should always be clozed in
+  full.
+- `personal_note` (when present) is the user's stated reason for highlighting
+  this phrase — usually a short gloss like "= of course" or "means 'right?'".
+  Treat it as authoritative: the cloze MUST cover the part of the phrase the
+  note is about. If the note glosses the whole phrase, cloze the whole
+  phrase. Do NOT cloze a sub-span that excludes what the note refers to.
 - Never emit `::` or `}}` inside a cloze answer or hint — those break Anki.
 - Hints exist to disambiguate synonyms so the card isn't failed for the wrong
   reason; keep each under ~25 characters.
@@ -267,13 +281,42 @@ def _load_client():
     return anthropic.Anthropic(api_key=api_key)
 
 
-def _build_user_message(phrase: str, context: str, note: str | None) -> str:
+def _build_user_message(
+    phrase: str,
+    context: str,
+    note: str | None,
+    phrase_span: tuple[int, int] | None,
+) -> str:
+    """Build the user message. `phrase_span` is the result of
+    `find_phrase_in_context(context, phrase)` — passed in so callers can
+    reuse it for downstream validation without recomputing."""
     parts = [
         f"phrase: {phrase}",
         f"context_sentence: {context}",
     ]
+    # When phrase_span is present we hand the LLM hard offset bounds for
+    # cloze selection. Without this, the LLM tends to drift away from what
+    # the user actually highlighted (e.g. clozing a different construction
+    # in the same sentence). If we can't locate it, fall back to the
+    # looser instruction in the system prompt.
+    if phrase_span is not None:
+        start, end = phrase_span
+        parts.append(
+            f"phrase_offsets_in_context: [{start}, {end}] "
+            f"(highlighted text: {context[start:end]!r}). "
+            "Cloze spans MUST stay strictly inside this range."
+        )
+    else:
+        parts.append(
+            "phrase_offsets_in_context: (could not be located verbatim — "
+            "cloze the substring of context_sentence that best corresponds "
+            "to the phrase, and nothing else)."
+        )
     if note:
-        parts.append(f"personal_note: {note}")
+        parts.append(
+            f"personal_note (drives cloze selection — cloze MUST cover the "
+            f"part of the phrase this note is about): {note}"
+        )
     else:
         parts.append("personal_note: (none)")
     parts.append(
@@ -289,9 +332,14 @@ def _call_llm(
     phrase: str,
     context: str,
     note: str | None,
+    phrase_span: tuple[int, int] | None,
     max_retries: int = 2,
 ) -> dict:
-    """Invoke the LLM with tool use. Returns the tool input dict."""
+    """Invoke the LLM with tool use. Returns the tool input dict.
+
+    `phrase_span` is `find_phrase_in_context(context, phrase)` — passed in
+    so callers can reuse the same span for downstream span-bounds validation
+    without scanning the sentence twice."""
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
@@ -311,7 +359,9 @@ def _call_llm(
                 messages=[
                     {
                         "role": "user",
-                        "content": _build_user_message(phrase, context, note),
+                        "content": _build_user_message(
+                            phrase, context, note, phrase_span
+                        ),
                     }
                 ],
             )
@@ -352,7 +402,16 @@ def _build_result(
     phrase: str,
     context: str,
     tool_input: dict,
+    phrase_span: tuple[int, int] | None = None,
 ) -> EnrichmentResult:
+    """Validate the LLM's tool output and produce an `EnrichmentResult`.
+
+    `phrase_span`: precomputed `find_phrase_in_context(context, phrase)`. When
+    None, we recompute here. We surface a one-line stderr warning when the
+    phrase can't be located in the context — those rows skip the in-phrase
+    bounds check and rely on prompt instructions alone, which is worth
+    knowing about during a re-run.
+    """
     spans_raw = _coerce_spans(tool_input.get("cloze_spans"))
     hints = list(tool_input.get("cloze_hints") or [])
     if len(hints) != len(spans_raw):
@@ -365,16 +424,41 @@ def _build_result(
     # Try the LLM's spans first; fall back to a whole-phrase cloze if they
     # don't validate (spec §9 #7). Record whether the fallback fired so we
     # can flag the row for hand-review downstream.
+    #
+    # We additionally enforce that every span lies within the highlighted
+    # phrase's offsets in the context. The LLM is instructed to do this in
+    # the prompt, but it sometimes drifts to nearby words; this check keeps
+    # the cloze anchored to what the user actually highlighted.
     fallback_used = False
+    if phrase_span is None:
+        phrase_span = find_phrase_in_context(context, phrase)
+        if phrase_span is None:
+            # The phrase doesn't appear verbatim in the context (e.g. the
+            # CSV stored a normalised form, or the EPUB uses curly quotes
+            # the user's highlight didn't). Bounds check is skipped for
+            # this row; flag it so reviewers know which cards relied on
+            # prompt-only anchoring.
+            print(
+                f"  ⚠ phrase {phrase!r} not located verbatim in context; "
+                "skipping in-phrase span bounds check.",
+                file=sys.stderr,
+            )
     try:
         validate_spans(context, spans)
+        if phrase_span is not None:
+            ph_start, ph_end = phrase_span
+            for sp in spans:
+                if sp.start < ph_start or sp.end > ph_end:
+                    raise ClozeError(
+                        f"span ({sp.start}, {sp.end}) escapes highlighted "
+                        f"phrase bounds ({ph_start}, {ph_end})"
+                    )
     except ClozeError as e:
-        fallback = find_phrase_in_context(context, phrase)
-        if fallback is None:
+        if phrase_span is None:
             raise EnrichmentError(
                 f"cloze spans invalid ({e}) and phrase not found in context"
             ) from e
-        start, end = fallback
+        start, end = phrase_span
         spans = [ClozeSpan(start, end, "")]
         validate_spans(context, spans)
         fallback_used = True
@@ -423,6 +507,40 @@ def _build_result(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+# Cache schema sentinel. Bump when a change to the enrichment pipeline
+# invalidates older cached LLM outputs (e.g. new fields, new validation
+# rules). Cached entries are considered fresh only when their `_schema_v`
+# matches CACHE_SCHEMA_VERSION.
+#
+# v1: introduced when we added `explanation`.
+# v2: spans must lie within the highlighted phrase's offsets (anchoring fix).
+#     Older cached entries may have spans that drift outside the highlight;
+#     re-fetching them is cheaper than bespoke fixup logic.
+CACHE_SCHEMA_VERSION = 2
+
+
+def is_cache_entry_fresh(entry: dict | None) -> bool:
+    """Single source of truth for cache freshness. Both the public
+    `enrich_phrase` path and the parallel batch path in `enrich_phrases.py`
+    consult this so cache hits resolve identically."""
+    if entry is None:
+        return False
+    if not (entry.get("explanation") or "").strip():
+        return False
+    if int(entry.get("_schema_v") or 0) < CACHE_SCHEMA_VERSION:
+        return False
+    return True
+
+
+def _stamp_schema(tool_input: dict) -> dict:
+    """Tag a freshly-produced tool_input with the current schema version
+    before caching. The sentinel is stored alongside the LLM fields and
+    ignored by `_build_result` (which only reads the named fields)."""
+    stamped = dict(tool_input)
+    stamped["_schema_v"] = CACHE_SCHEMA_VERSION
+    return stamped
+
+
 def enrich_phrase(
     phrase: str,
     context_sentence: str,
@@ -439,20 +557,20 @@ def enrich_phrase(
     if cache is None:
         cache = EnrichmentCache()
 
+    phrase_span = find_phrase_in_context(context_sentence, phrase)
     cached = cache.get(phrase, context_sentence)
-    # Treat pre-`explanation` cache entries as stale. They were produced before
-    # the schema gained the English-explanation field; re-fetching is cheap and
-    # avoids bespoke backfill logic downstream.
-    if cached is not None and (cached.get("explanation") or "").strip():
-        result = _build_result(phrase, context_sentence, cached)
+    if is_cache_entry_fresh(cached):
+        result = _build_result(phrase, context_sentence, cached, phrase_span)
         result.cache_hit = True
         return result
 
     if client is None:
         client = _load_client()
 
-    tool_input = _call_llm(client, phrase, context_sentence, personal_note)
+    tool_input = _call_llm(
+        client, phrase, context_sentence, personal_note, phrase_span
+    )
     # Validate before caching so we don't permanently cache garbage.
-    result = _build_result(phrase, context_sentence, tool_input)
-    cache.put(phrase, context_sentence, tool_input)
+    result = _build_result(phrase, context_sentence, tool_input, phrase_span)
+    cache.put(phrase, context_sentence, _stamp_schema(tool_input))
     return result
