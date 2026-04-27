@@ -142,7 +142,10 @@ def _normalise(text: str) -> str:
 _SENT_SPLIT = re.compile(r"(?<=[.!?»\"])\s+")
 
 
-_SENT_END_CHARS = ".!?»\""
+# Characters Spanish fiction uses to terminate a sentence (or a quoted clause
+# that may still have a dialog tag after it). Includes closing curly quotes
+# (U+201D, U+2019) which Kindle exports occasionally produce.
+_SENT_END_CHARS = ".!?»\"”’"
 
 
 def _extract_sentence(full_text: str, match_start: int, match_end: int) -> str:
@@ -155,6 +158,13 @@ def _extract_sentence(full_text: str, match_start: int, match_end: int) -> str:
     in the following sentence. This matters for orange phrase highlights
     where the user often highlights a complete sentence — extending in
     either direction would dilute the cloze context.
+
+    Caveat for dialog: a highlight ending with `?"` may be followed by a
+    lowercase dialog tag (`preguntó.`) that's grammatically part of the
+    same sentence. We detect this case by peeking at the next non-space
+    character — if it's lowercase, we extend right up to the next sentence
+    terminator (the dialog tag's period). If it's uppercase or another
+    sentence-end character, we stop.
     """
     window_start = max(0, match_start - 300)
     window_end = min(len(full_text), match_end + 300)
@@ -163,26 +173,32 @@ def _extract_sentence(full_text: str, match_start: int, match_end: int) -> str:
 
     highlight_text = full_text[match_start:match_end]
     highlight_stripped = highlight_text.rstrip()
-    # If highlight already ends with sentence-ending punctuation, treat the
-    # right side as already terminated. Don't reach forward into the next
-    # sentence just because the regex finds another period there.
+
+    # Right boundary
     if highlight_stripped and highlight_stripped[-1] in _SENT_END_CHARS:
-        right_boundary = 0
+        peek = right_chunk.lstrip()
+        # Empty / starts a new sentence → don't extend.
+        if not peek or peek[0] in _SENT_END_CHARS or peek[0].isupper():
+            right_boundary = 0
+        else:
+            # Continuation in the same sentence (e.g. dialog tag). Walk to
+            # the next sentence terminator.
+            right_match = re.search(r"[.!?»\"”’]", right_chunk)
+            right_boundary = right_match.end() if right_match else len(right_chunk)
     else:
-        right_match = re.search(r"[.!?»\"]", right_chunk)
+        right_match = re.search(r"[.!?»\"”’]", right_chunk)
         right_boundary = right_match.end() if right_match else len(right_chunk)
 
-    # If the character(s) immediately before the highlight are sentence-
-    # terminating, treat the left side as already at sentence start. The
-    # finditer-based search handles the common "punct + space" case but
-    # misses "punct" with no trailing space (e.g. when match_start lands
-    # right after a closing quote).
+    # Left boundary. If the character(s) immediately before the highlight
+    # are sentence-terminating, treat the left side as already at sentence
+    # start. The finditer-based search handles the common "punct + space"
+    # case but misses "punct" with no trailing space.
     left_trimmed = left_chunk.rstrip()
     if left_trimmed and left_trimmed[-1] in _SENT_END_CHARS:
         left_boundary = len(left_chunk)
     else:
         left_boundary = max(
-            (m.end() for m in re.finditer(r"[.!?»\"]\s", left_chunk)),
+            (m.end() for m in re.finditer(r"[.!?»\"”’]\s", left_chunk)),
             default=0,
         )
 
